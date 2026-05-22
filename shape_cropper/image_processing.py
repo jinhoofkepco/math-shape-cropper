@@ -131,32 +131,97 @@ def find_foreground_bbox(image: Image.Image) -> BBox | None:
 def enhance_for_saving(image: Image.Image) -> Image.Image:
     gray = ImageOps.grayscale(image)
     gray = ImageOps.autocontrast(gray, cutoff=1)
-    arr = np.asarray(gray, dtype=np.uint8).copy()
-
-    bright_cut = int(np.percentile(arr, 88))
-    white_cut = max(205, min(245, bright_cut + 8))
-    arr[arr >= white_cut] = 255
-
-    cleaned = Image.fromarray(arr, mode="L")
-    cleaned = ImageEnhance.Contrast(cleaned).enhance(1.35)
-    cleaned = ImageEnhance.Sharpness(cleaned).enhance(1.15)
+    gray = ImageEnhance.Contrast(gray).enhance(1.2)
+    cleaned = ImageEnhance.Sharpness(gray).enhance(1.15)
     return make_white_background_transparent(cleaned)
 
 
 def make_white_background_transparent(image: Image.Image) -> Image.Image:
     gray = np.asarray(image.convert("L"), dtype=np.uint8)
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
+    ink_cut = _adaptive_ink_cut(gray)
+    ink_mask = gray <= ink_cut
+    ink_mask = _remove_dense_ink_interiors(ink_mask)
+    ink_mask = _remove_tiny_components(ink_mask)
 
-    threshold = max(210, min(248, int(np.percentile(gray, 82)) + 10))
-    alpha = np.full(gray.shape, 255, dtype=np.uint8)
-    alpha[gray >= threshold] = 0
+    alpha = np.zeros(gray.shape, dtype=np.uint8)
+    alpha[ink_mask] = 255
 
-    fade_zone = (gray >= threshold - 22) & (gray < threshold)
-    alpha[fade_zone] = np.clip((threshold - gray[fade_zone]) * 12, 0, 255).astype(np.uint8)
+    soft_mask = (gray <= ink_cut + 28) & _dilate_mask(ink_mask)
+    soft_alpha = np.clip((ink_cut + 28 - gray[soft_mask]) * 9, 0, 220).astype(np.uint8)
+    alpha[soft_mask] = np.maximum(alpha[soft_mask], soft_alpha)
 
-    # Keep foreground neutral and let the alpha channel carry paper cleanup.
-    rgba = np.dstack([rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2], alpha])
+    black = np.zeros_like(gray, dtype=np.uint8)
+    rgba = np.dstack([black, black, black, alpha])
     return Image.fromarray(rgba, mode="RGBA")
+
+
+def _adaptive_ink_cut(gray: np.ndarray) -> int:
+    dark_percentile = int(np.percentile(gray, 4))
+    return max(42, min(72, dark_percentile + 10))
+
+
+def _dilate_mask(mask: np.ndarray) -> np.ndarray:
+    padded = np.pad(mask, 1, mode="constant", constant_values=False)
+    result = np.zeros_like(mask, dtype=bool)
+    for y_offset in range(3):
+        for x_offset in range(3):
+            result |= padded[y_offset : y_offset + mask.shape[0], x_offset : x_offset + mask.shape[1]]
+    return result
+
+
+def _remove_dense_ink_interiors(mask: np.ndarray) -> np.ndarray:
+    padded = np.pad(mask, 2, mode="constant", constant_values=False)
+    neighbor_count = np.zeros(mask.shape, dtype=np.uint8)
+    for y_offset in range(5):
+        for x_offset in range(5):
+            neighbor_count += padded[
+                y_offset : y_offset + mask.shape[0],
+                x_offset : x_offset + mask.shape[1],
+            ].astype(np.uint8)
+    return mask & (neighbor_count < 18)
+
+
+def _remove_tiny_components(mask: np.ndarray) -> np.ndarray:
+    height, width = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    cleaned = np.zeros_like(mask, dtype=bool)
+
+    for y in range(height):
+        for x in range(width):
+            if not mask[y, x] or visited[y, x]:
+                continue
+
+            stack = [(y, x)]
+            visited[y, x] = True
+            pixels: list[tuple[int, int]] = []
+            min_x = max_x = x
+            min_y = max_y = y
+
+            while stack:
+                cy, cx = stack.pop()
+                pixels.append((cy, cx))
+                min_x = min(min_x, cx)
+                max_x = max(max_x, cx)
+                min_y = min(min_y, cy)
+                max_y = max(max_y, cy)
+
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dy == 0 and dx == 0:
+                            continue
+                        ny = cy + dy
+                        nx = cx + dx
+                        if 0 <= ny < height and 0 <= nx < width and mask[ny, nx] and not visited[ny, nx]:
+                            visited[ny, nx] = True
+                            stack.append((ny, nx))
+
+            component_width = max_x - min_x + 1
+            component_height = max_y - min_y + 1
+            if len(pixels) >= 12 or component_width >= 9 or component_height >= 9:
+                for py, px in pixels:
+                    cleaned[py, px] = True
+
+    return cleaned
 
 
 def sanitize_name(value: str, fallback: str) -> str:

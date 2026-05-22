@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import re
 import sys
 from pathlib import Path
 import tkinter as tk
@@ -336,7 +337,7 @@ class CropperApp(tk.Tk):
 
     def add_crop(self, processed: ProcessedCrop, source_path: Path) -> None:
         group = self._get_page_group(source_path)
-        suffix = f"{len(group.records) + 1:03d}"
+        suffix = str(len(group.records))
         record = CropRecord(
             source_path=source_path,
             image=processed.image,
@@ -355,7 +356,7 @@ class CropperApp(tk.Tk):
             return group
         group = PageCropGroup(
             source_path=source_path,
-            middle_name_var=tk.StringVar(value=source_path.stem),
+            middle_name_var=tk.StringVar(value=f"{len(self.page_groups) + 1}_"),
             records=[],
         )
         self.page_group_by_path[source_path] = group
@@ -385,12 +386,8 @@ class CropperApp(tk.Tk):
         header = ttk.Frame(self.crop_inner, style="Panel.TFrame")
         header.grid(row=row, column=0, columnspan=3, sticky="ew", padx=4, pady=(8 if row else 0, 4))
         header.columnconfigure(0, weight=1)
-        ttk.Entry(header, textvariable=group.middle_name_var, justify=tk.CENTER).grid(
-            row=0,
-            column=0,
-            sticky="ew",
-            padx=2,
-            pady=2,
+        self._numeric_name_control(header, group.middle_name_var, min_value=1, width=7, suffix_when_empty="_").grid(
+            row=0, column=0, sticky="ew", padx=2, pady=2
         )
 
     def _render_crop_card(self, record: CropRecord, row: int, column: int) -> None:
@@ -404,12 +401,42 @@ class CropperApp(tk.Tk):
         preview_label.grid(row=0, column=0, padx=5, pady=(5, 3))
         preview_label.bind("<Button-1>", lambda _event, item=record: self.delete_crop(item))
 
-        ttk.Entry(card, textvariable=record.suffix_var, width=8, justify=tk.CENTER).grid(
-            row=1,
-            column=0,
-            padx=8,
-            pady=(0, 6),
-        )
+        self._numeric_name_control(card, record.suffix_var, min_value=0, width=4).grid(row=1, column=0, pady=(0, 6))
+
+    def _numeric_name_control(
+        self,
+        parent: tk.Widget,
+        value_var: tk.StringVar,
+        min_value: int,
+        width: int,
+        suffix_when_empty: str = "",
+    ) -> ttk.Frame:
+        frame = ttk.Frame(parent)
+        frame.columnconfigure(1, weight=1)
+        ttk.Button(
+            frame,
+            text="<",
+            width=2,
+            command=lambda: self._step_numeric_name(value_var, -1, min_value, suffix_when_empty),
+        ).grid(row=0, column=0, padx=(0, 2))
+        ttk.Entry(frame, textvariable=value_var, width=width, justify=tk.CENTER).grid(row=0, column=1, sticky="ew")
+        ttk.Button(
+            frame,
+            text=">",
+            width=2,
+            command=lambda: self._step_numeric_name(value_var, 1, min_value, suffix_when_empty),
+        ).grid(row=0, column=2, padx=(2, 0))
+        return frame
+
+    def _step_numeric_name(self, value_var: tk.StringVar, delta: int, min_value: int, suffix_when_empty: str) -> None:
+        value = value_var.get().strip()
+        match = re.search(r"\d+", value)
+        if match is None:
+            value_var.set(f"{min_value}{suffix_when_empty}")
+            return
+
+        number = max(min_value, int(match.group()) + delta)
+        value_var.set(f"{value[:match.start()]}{number}{value[match.end():]}")
 
     def delete_crop(self, record: CropRecord) -> None:
         if record in self.crop_records:
@@ -440,8 +467,7 @@ class CropperApp(tk.Tk):
             middle = sanitize_name(group.middle_name_var.get(), group.source_path.stem)
             for index, record in enumerate(group.records, start=1):
                 suffix = sanitize_name(record.suffix_var.get(), f"{index:03d}")
-                file_parts = [part for part in (common, middle, suffix) if part]
-                file_name = "_".join(file_parts) + ".png"
+                file_name = self._build_output_file_name(common, middle, suffix)
                 output_path = unique_path(output_dir / file_name)
                 record.image.save(output_path)
                 saved_count += 1
@@ -459,6 +485,18 @@ class CropperApp(tk.Tk):
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         self.status_var.set(f"{saved_count}개 저장 완료: {output_dir}")
         messagebox.showinfo("저장 완료", f"{saved_count}개 이미지를 저장했습니다.\n{output_dir}")
+
+    def _build_output_file_name(self, common: str, middle: str, suffix: str) -> str:
+        parts: list[str] = []
+        if common:
+            parts.append(common.rstrip("_"))
+        if middle and suffix:
+            parts.append(f"{middle}{suffix}" if middle.endswith("_") else f"{middle}_{suffix}")
+        elif middle:
+            parts.append(middle.rstrip("_"))
+        elif suffix:
+            parts.append(suffix)
+        return "_".join(part for part in parts if part) + ".png"
 
     def _point_in_display(self, x: int, y: int) -> bool:
         if self.page_image is None:
