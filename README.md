@@ -49,3 +49,9 @@ git remote add origin https://github.com/사용자명/저장소명.git
 git branch -M main
 git push -u origin main
 ```
+
+또는 저장소 URL을 받은 뒤 아래 스크립트를 실행해도 됩니다.
+
+```powershell
+.\scripts\publish_to_github.ps1 "https://github.com/사용자명/저장소명.git"
+```
