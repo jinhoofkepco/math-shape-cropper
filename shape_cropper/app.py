@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import sys
 from pathlib import Path
 import tkinter as tk
@@ -165,6 +166,8 @@ class CropperApp(tk.Tk):
         self.crop_window = self.crop_canvas.create_window((0, 0), window=self.crop_inner, anchor="nw")
         self.crop_inner.bind("<Configure>", self._update_crop_scroll_region)
         self.crop_canvas.bind("<Configure>", self._resize_crop_inner)
+        for column in range(3):
+            self.crop_inner.columnconfigure(column, weight=1, uniform="crop")
 
     def choose_folder(self) -> None:
         folder = filedialog.askdirectory(title="문제집 사진 폴더 선택")
@@ -312,7 +315,7 @@ class CropperApp(tk.Tk):
 
         bbox = self._display_bbox_to_image_bbox((start_x, start_y, end_x, end_y))
         try:
-            processed = process_crop(self.page_image, bbox)
+            processed = process_crop(self.page_image, bbox, refine_bounds=False)
         except Exception as exc:
             messagebox.showerror("크롭 실패", str(exc))
             return
@@ -328,27 +331,41 @@ class CropperApp(tk.Tk):
             suffix_var=tk.StringVar(value=suffix),
         )
         self.crop_records.append(record)
-        self._render_crop_card(record)
+        self._refresh_crop_grid(scroll_to_bottom=True)
         self.status_var.set(f"크롭 추가: {source_path.name} / {suffix}")
 
-    def _render_crop_card(self, record: CropRecord) -> None:
+    def _refresh_crop_grid(self, scroll_to_bottom: bool = False) -> None:
+        for child in self.crop_inner.winfo_children():
+            child.destroy()
+        for index, record in enumerate(self.crop_records):
+            self._render_crop_card(record, row=index // 3, column=index % 3)
+        self.crop_inner.update_idletasks()
+        self._update_crop_scroll_region(None)
+        if scroll_to_bottom:
+            self.after_idle(lambda: self.crop_canvas.yview_moveto(1.0))
+
+    def _render_crop_card(self, record: CropRecord, row: int, column: int) -> None:
         card = ttk.Frame(self.crop_inner, style="Card.TFrame")
-        card.pack(fill=tk.X, padx=2, pady=(0, 10))
+        card.grid(row=row, column=column, sticky="nsew", padx=4, pady=4)
         card.columnconfigure(0, weight=1)
 
-        preview = self._make_preview(record.image, max_width=280, max_height=180)
+        preview = self._make_preview(record.image, max_width=94, max_height=82)
         record.photo = ImageTk.PhotoImage(preview)
-        ttk.Label(card, image=record.photo, background="#ffffff").grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 4))
+        preview_label = ttk.Label(card, image=record.photo, background="#ffffff", cursor="hand2")
+        preview_label.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 3))
+        preview_label.bind("<Button-1>", lambda _event, item=record: self.delete_crop(item))
 
-        ttk.Label(card, text=record.source_path.name, style="Muted.TLabel", background="#ffffff").grid(row=1, column=0, columnspan=2, sticky="w", padx=8)
-        ttk.Label(card, text="개별 이름", background="#ffffff").grid(row=2, column=0, sticky="w", padx=8, pady=(6, 2))
-        ttk.Entry(card, textvariable=record.suffix_var).grid(row=3, column=0, sticky="ew", padx=(8, 4), pady=(0, 8))
-        ttk.Button(card, text="삭제", command=lambda item=record, widget=card: self.delete_crop(item, widget)).grid(row=3, column=1, sticky="e", padx=(0, 8), pady=(0, 8))
+        ttk.Entry(card, textvariable=record.suffix_var, width=8, justify=tk.CENTER).grid(
+            row=1,
+            column=0,
+            padx=8,
+            pady=(0, 6),
+        )
 
-    def delete_crop(self, record: CropRecord, widget: ttk.Frame) -> None:
+    def delete_crop(self, record: CropRecord) -> None:
         if record in self.crop_records:
             self.crop_records.remove(record)
-        widget.destroy()
+        self._refresh_crop_grid()
         self.status_var.set("크롭을 삭제했습니다.")
 
     def save_all(self) -> None:
@@ -405,13 +422,20 @@ class CropperApp(tk.Tk):
         )
 
     def _display_bbox_to_image_bbox(self, bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        if self.page_image is None:
+            return 0, 0, 0, 0
         offset_x, offset_y = self.image_offset
         x0, y0, x1, y1 = bbox
-        left = int((min(x0, x1) - offset_x) / self.display_scale)
-        top = int((min(y0, y1) - offset_y) / self.display_scale)
-        right = int((max(x0, x1) - offset_x) / self.display_scale)
-        bottom = int((max(y0, y1) - offset_y) / self.display_scale)
-        return left, top, right, bottom
+        left = math.floor((min(x0, x1) - offset_x) / self.display_scale)
+        top = math.floor((min(y0, y1) - offset_y) / self.display_scale)
+        right = math.ceil((max(x0, x1) - offset_x) / self.display_scale)
+        bottom = math.ceil((max(y0, y1) - offset_y) / self.display_scale)
+        return (
+            max(0, min(self.page_image.width, left)),
+            max(0, min(self.page_image.height, top)),
+            max(0, min(self.page_image.width, right)),
+            max(0, min(self.page_image.height, bottom)),
+        )
 
     def _make_preview(self, image: Image.Image, max_width: int, max_height: int) -> Image.Image:
         preview = image.copy()
@@ -422,7 +446,7 @@ class CropperApp(tk.Tk):
         canvas.paste(preview, (x, y))
         return canvas
 
-    def _update_crop_scroll_region(self, _event: tk.Event) -> None:
+    def _update_crop_scroll_region(self, _event: tk.Event | None) -> None:
         self.crop_canvas.configure(scrollregion=self.crop_canvas.bbox("all"))
 
     def _resize_crop_inner(self, event: tk.Event) -> None:

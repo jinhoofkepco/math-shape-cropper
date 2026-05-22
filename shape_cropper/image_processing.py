@@ -39,13 +39,21 @@ def expand_bbox(bbox: BBox, width: int, height: int, margin: int) -> BBox:
     return clip_bbox((x0 - margin, y0 - margin, x1 + margin, y1 + margin), width, height)
 
 
-def process_crop(page_image: Image.Image, bbox: BBox) -> ProcessedCrop:
-    """Crop a rough user selection, refine it around dark figure pixels, and clean it."""
+def process_crop(page_image: Image.Image, bbox: BBox, refine_bounds: bool = False) -> ProcessedCrop:
+    """Crop a user selection and clean it for saving."""
     page_image = ImageOps.exif_transpose(page_image).convert("RGB")
     page_width, page_height = page_image.size
     original = clip_bbox(bbox, page_width, page_height)
     if original[2] - original[0] < 4 or original[3] - original[1] < 4:
         raise ValueError("Crop area is too small.")
+
+    if not refine_bounds:
+        cropped = page_image.crop(original)
+        return ProcessedCrop(
+            image=enhance_for_saving(cropped),
+            original_bbox=original,
+            refined_bbox=original,
+        )
 
     selection_width = original[2] - original[0]
     selection_height = original[3] - original[1]
