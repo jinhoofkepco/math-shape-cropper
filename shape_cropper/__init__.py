@@ -1,0 +1,2 @@
+"""Math workbook shape cropper."""
+
