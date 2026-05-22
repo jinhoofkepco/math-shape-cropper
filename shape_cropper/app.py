@@ -9,7 +9,10 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageOps, ImageTk
 
-from .image_processing import ProcessedCrop, process_crop, sanitize_name, unique_path
+try:
+    from .image_processing import ProcessedCrop, process_crop, sanitize_name, unique_path
+except ImportError:
+    from image_processing import ProcessedCrop, process_crop, sanitize_name, unique_path
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
@@ -434,4 +437,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
