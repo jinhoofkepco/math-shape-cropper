@@ -29,6 +29,13 @@ class CropRecord:
     photo: ImageTk.PhotoImage | None = None
 
 
+@dataclass
+class PageCropGroup:
+    source_path: Path
+    middle_name_var: tk.StringVar
+    records: list[CropRecord]
+
+
 class CropperApp(tk.Tk):
     def __init__(self, initial_folder: Path | None = None) -> None:
         super().__init__()
@@ -49,6 +56,8 @@ class CropperApp(tk.Tk):
         self.drag_start: tuple[int, int] | None = None
         self.selection_rect: int | None = None
         self.crop_records: list[CropRecord] = []
+        self.page_groups: list[PageCropGroup] = []
+        self.page_group_by_path: dict[Path, PageCropGroup] = {}
 
         self.common_name_var = tk.StringVar()
         self.save_folder_var = tk.StringVar(value="cropped_shapes")
@@ -188,6 +197,10 @@ class CropperApp(tk.Tk):
         self.selected_folder = folder
         self.output_base = None
         self.output_base_var.set("선택한 사진 폴더 기준")
+        self.crop_records.clear()
+        self.page_groups.clear()
+        self.page_group_by_path.clear()
+        self._refresh_crop_grid()
         self.image_paths = sorted(
             [path for path in folder.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS],
             key=lambda path: path.name.lower(),
@@ -322,7 +335,8 @@ class CropperApp(tk.Tk):
         self.add_crop(processed, self.current_path)
 
     def add_crop(self, processed: ProcessedCrop, source_path: Path) -> None:
-        suffix = f"{len(self.crop_records) + 1:03d}"
+        group = self._get_page_group(source_path)
+        suffix = f"{len(group.records) + 1:03d}"
         record = CropRecord(
             source_path=source_path,
             image=processed.image,
@@ -331,18 +345,53 @@ class CropperApp(tk.Tk):
             suffix_var=tk.StringVar(value=suffix),
         )
         self.crop_records.append(record)
+        group.records.append(record)
         self._refresh_crop_grid(scroll_to_bottom=True)
         self.status_var.set(f"크롭 추가: {source_path.name} / {suffix}")
+
+    def _get_page_group(self, source_path: Path) -> PageCropGroup:
+        group = self.page_group_by_path.get(source_path)
+        if group is not None:
+            return group
+        group = PageCropGroup(
+            source_path=source_path,
+            middle_name_var=tk.StringVar(value=source_path.stem),
+            records=[],
+        )
+        self.page_group_by_path[source_path] = group
+        self.page_groups.append(group)
+        return group
 
     def _refresh_crop_grid(self, scroll_to_bottom: bool = False) -> None:
         for child in self.crop_inner.winfo_children():
             child.destroy()
-        for index, record in enumerate(self.crop_records):
-            self._render_crop_card(record, row=index // 3, column=index % 3)
+
+        row = 0
+        for group in self.page_groups:
+            if not group.records:
+                continue
+            self._render_page_header(group, row)
+            row += 1
+            for index, record in enumerate(group.records):
+                self._render_crop_card(record, row=row + index // 3, column=index % 3)
+            row += max(1, math.ceil(len(group.records) / 3))
+
         self.crop_inner.update_idletasks()
         self._update_crop_scroll_region(None)
         if scroll_to_bottom:
             self.after_idle(lambda: self.crop_canvas.yview_moveto(1.0))
+
+    def _render_page_header(self, group: PageCropGroup, row: int) -> None:
+        header = ttk.Frame(self.crop_inner, style="Panel.TFrame")
+        header.grid(row=row, column=0, columnspan=3, sticky="ew", padx=4, pady=(8 if row else 0, 4))
+        header.columnconfigure(0, weight=1)
+        ttk.Entry(header, textvariable=group.middle_name_var, justify=tk.CENTER).grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=2,
+            pady=2,
+        )
 
     def _render_crop_card(self, record: CropRecord, row: int, column: int) -> None:
         card = ttk.Frame(self.crop_inner, style="Card.TFrame")
@@ -352,7 +401,7 @@ class CropperApp(tk.Tk):
         preview = self._make_preview(record.image, max_width=94, max_height=82)
         record.photo = ImageTk.PhotoImage(preview)
         preview_label = ttk.Label(card, image=record.photo, background="#ffffff", cursor="hand2")
-        preview_label.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 3))
+        preview_label.grid(row=0, column=0, padx=5, pady=(5, 3))
         preview_label.bind("<Button-1>", lambda _event, item=record: self.delete_crop(item))
 
         ttk.Entry(card, textvariable=record.suffix_var, width=8, justify=tk.CENTER).grid(
@@ -365,6 +414,11 @@ class CropperApp(tk.Tk):
     def delete_crop(self, record: CropRecord) -> None:
         if record in self.crop_records:
             self.crop_records.remove(record)
+        group = self.page_group_by_path.get(record.source_path)
+        if group is not None and record in group.records:
+            group.records.remove(record)
+        self.page_groups = [page_group for page_group in self.page_groups if page_group.records]
+        self.page_group_by_path = {page_group.source_path: page_group for page_group in self.page_groups}
         self._refresh_crop_grid()
         self.status_var.set("크롭을 삭제했습니다.")
 
@@ -382,20 +436,24 @@ class CropperApp(tk.Tk):
         manifest: list[dict[str, object]] = []
         saved_count = 0
 
-        for index, record in enumerate(self.crop_records, start=1):
-            suffix = sanitize_name(record.suffix_var.get(), f"{index:03d}")
-            file_name = f"{common}_{suffix}.png" if common else f"{suffix}.png"
-            output_path = unique_path(output_dir / file_name)
-            record.image.save(output_path)
-            saved_count += 1
-            manifest.append(
-                {
-                    "file": output_path.name,
-                    "source": str(record.source_path),
-                    "original_bbox": record.original_bbox,
-                    "refined_bbox": record.refined_bbox,
-                }
-            )
+        for group in self.page_groups:
+            middle = sanitize_name(group.middle_name_var.get(), group.source_path.stem)
+            for index, record in enumerate(group.records, start=1):
+                suffix = sanitize_name(record.suffix_var.get(), f"{index:03d}")
+                file_parts = [part for part in (common, middle, suffix) if part]
+                file_name = "_".join(file_parts) + ".png"
+                output_path = unique_path(output_dir / file_name)
+                record.image.save(output_path)
+                saved_count += 1
+                manifest.append(
+                    {
+                        "file": output_path.name,
+                        "source": str(record.source_path),
+                        "page_name": middle,
+                        "original_bbox": record.original_bbox,
+                        "refined_bbox": record.refined_bbox,
+                    }
+                )
 
         manifest_path = unique_path(output_dir / f"{common}_manifest.json")
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -443,7 +501,10 @@ class CropperApp(tk.Tk):
         canvas = Image.new("RGB", (max_width, max_height), "white")
         x = (max_width - preview.width) // 2
         y = (max_height - preview.height) // 2
-        canvas.paste(preview, (x, y))
+        if preview.mode == "RGBA":
+            canvas.paste(preview, (x, y), preview)
+        else:
+            canvas.paste(preview, (x, y))
         return canvas
 
     def _update_crop_scroll_region(self, _event: tk.Event | None) -> None:

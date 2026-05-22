@@ -140,7 +140,23 @@ def enhance_for_saving(image: Image.Image) -> Image.Image:
     cleaned = Image.fromarray(arr, mode="L")
     cleaned = ImageEnhance.Contrast(cleaned).enhance(1.35)
     cleaned = ImageEnhance.Sharpness(cleaned).enhance(1.15)
-    return cleaned.convert("RGB")
+    return make_white_background_transparent(cleaned)
+
+
+def make_white_background_transparent(image: Image.Image) -> Image.Image:
+    gray = np.asarray(image.convert("L"), dtype=np.uint8)
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
+
+    threshold = max(210, min(248, int(np.percentile(gray, 82)) + 10))
+    alpha = np.full(gray.shape, 255, dtype=np.uint8)
+    alpha[gray >= threshold] = 0
+
+    fade_zone = (gray >= threshold - 22) & (gray < threshold)
+    alpha[fade_zone] = np.clip((threshold - gray[fade_zone]) * 12, 0, 255).astype(np.uint8)
+
+    # Keep foreground neutral and let the alpha channel carry paper cleanup.
+    rgba = np.dstack([rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2], alpha])
+    return Image.fromarray(rgba, mode="RGBA")
 
 
 def sanitize_name(value: str, fallback: str) -> str:
