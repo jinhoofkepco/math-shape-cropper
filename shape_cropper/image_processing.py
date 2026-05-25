@@ -18,6 +18,14 @@ class ProcessedCrop:
     refined_bbox: BBox
 
 
+@dataclass(frozen=True)
+class WorkbookProcessedCrop(ProcessedCrop):
+    answer_bbox: BBox | None
+    answer_image: Image.Image | None
+    problem_number_image: Image.Image
+    red_pixel_count: int
+
+
 def normalize_bbox(bbox: BBox) -> BBox:
     x0, y0, x1, y1 = bbox
     left, right = sorted((int(round(x0)), int(round(x1))))
@@ -39,7 +47,7 @@ def expand_bbox(bbox: BBox, width: int, height: int, margin: int) -> BBox:
     return clip_bbox((x0 - margin, y0 - margin, x1 + margin, y1 + margin), width, height)
 
 
-def process_crop(page_image: Image.Image, bbox: BBox, refine_bounds: bool = False) -> ProcessedCrop:
+def process_crop(page_image: Image.Image, bbox: BBox, refine_bounds: bool = False, make_transparent: bool = True) -> ProcessedCrop:
     """Crop a user selection and clean it for saving."""
     page_image = ImageOps.exif_transpose(page_image).convert("RGB")
     page_width, page_height = page_image.size
@@ -50,7 +58,7 @@ def process_crop(page_image: Image.Image, bbox: BBox, refine_bounds: bool = Fals
     if not refine_bounds:
         cropped = page_image.crop(original)
         return ProcessedCrop(
-            image=enhance_for_saving(cropped),
+            image=enhance_for_saving(cropped, make_transparent),
             original_bbox=original,
             refined_bbox=original,
         )
@@ -76,10 +84,176 @@ def process_crop(page_image: Image.Image, bbox: BBox, refine_bounds: bool = Fals
 
     refined_image = page_image.crop(refined)
     return ProcessedCrop(
-        image=enhance_for_saving(refined_image),
+        image=enhance_for_saving(refined_image, make_transparent),
         original_bbox=original,
         refined_bbox=refined,
     )
+
+
+def process_workbook_crop(page_image: Image.Image, bbox: BBox, make_transparent: bool = True) -> WorkbookProcessedCrop:
+    """Crop a workbook problem, remove red answer marks, and prepare OCR regions."""
+    page_image = ImageOps.exif_transpose(page_image).convert("RGB")
+    page_width, page_height = page_image.size
+    original = clip_bbox(bbox, page_width, page_height)
+    if original[2] - original[0] < 4 or original[3] - original[1] < 4:
+        raise ValueError("Crop area is too small.")
+
+    cropped = page_image.crop(original)
+    red_mask_raw = find_red_answer_mask(cropped, expand=False)
+    red_mask = _expand_mask(red_mask_raw, iterations=2)
+    answer_bbox = mask_bbox(red_mask)
+    answer_image = None
+    if answer_bbox is not None:
+        number_bbox = answer_number_bbox(red_mask_raw, answer_bbox)
+        answer_image = cropped.crop(expand_bbox(number_bbox or answer_bbox, cropped.width, cropped.height, 8))
+
+    cleaned = remove_masked_pixels(cropped, red_mask)
+    number_crop = crop_problem_number_region(cropped)
+    return WorkbookProcessedCrop(
+        image=enhance_for_saving(cleaned, make_transparent),
+        original_bbox=original,
+        refined_bbox=original,
+        answer_bbox=answer_bbox,
+        answer_image=answer_image,
+        problem_number_image=number_crop,
+        red_pixel_count=int(red_mask.sum()),
+    )
+
+
+def find_red_answer_mask(image: Image.Image, *, expand: bool = True) -> np.ndarray:
+    rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
+    red = rgb[:, :, 0]
+    green = rgb[:, :, 1]
+    blue = rgb[:, :, 2]
+    mask = (
+        (red >= 105)
+        & (red - green >= 28)
+        & (red - blue >= 18)
+        & (red >= (green * 1.18))
+        & (red >= (blue * 1.12))
+    )
+    if expand:
+        return _expand_mask(mask, iterations=2)
+    return mask
+
+
+def mask_bbox(mask: np.ndarray) -> BBox | None:
+    ys, xs = np.where(mask)
+    if xs.size < 8:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def answer_number_bbox(mask: np.ndarray, answer_bbox: BBox) -> BBox | None:
+    x0, y0, x1, y1 = answer_bbox
+    local = mask[y0:y1, x0:x1]
+    if local.size == 0:
+        return None
+
+    counts = local.sum(axis=0)
+    active = np.where(counts > 0)[0]
+    if active.size == 0:
+        return None
+
+    merge_gap = max(3, int(local.shape[1] * 0.035))
+    split_gap = max(4, int(local.shape[1] * 0.05))
+    segments: list[tuple[int, int]] = []
+    start = int(active[0])
+    previous = int(active[0])
+    for value in active[1:]:
+        value = int(value)
+        if value - previous <= merge_gap + 1:
+            previous = value
+            continue
+        segments.append((start, previous))
+        start = previous = value
+    segments.append((start, previous))
+
+    if not segments:
+        return None
+
+    included = [segments[0]]
+    for segment in segments[1:]:
+        gap = segment[0] - included[-1][1] - 1
+        if gap > split_gap:
+            break
+        included.append(segment)
+
+    left = included[0][0]
+    right = included[-1][1] + 1
+    focused = local[:, left:right]
+    ys, xs = np.where(focused)
+    if xs.size == 0:
+        return None
+    return x0 + left + int(xs.min()), y0 + int(ys.min()), x0 + left + int(xs.max()) + 1, y0 + int(ys.max()) + 1
+
+
+def remove_masked_pixels(image: Image.Image, mask: np.ndarray) -> Image.Image:
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
+    if mask.any():
+        rgb[mask] = 255
+    return Image.fromarray(rgb, mode="RGB")
+
+
+def crop_problem_number_region(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    crop_width = min(width, max(100, int(width * 0.24)))
+    crop_height = min(height, max(150, int(height * 0.50)))
+    search = image.crop((0, 0, crop_width, crop_height))
+    circle_bbox = find_number_badge_bbox(search)
+    if circle_bbox is None:
+        return search
+    return search.crop(expand_bbox(circle_bbox, search.width, search.height, 5))
+
+
+def find_number_badge_bbox(image: Image.Image) -> BBox | None:
+    gray = np.asarray(image.convert("L"), dtype=np.uint8)
+    mask = gray < 225
+    height, width = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    candidates: list[tuple[int, int, int, int, int]] = []
+
+    for y in range(height):
+        for x in range(width):
+            if not mask[y, x] or visited[y, x]:
+                continue
+            stack = [(y, x)]
+            visited[y, x] = True
+            count = 0
+            min_x = max_x = x
+            min_y = max_y = y
+            while stack:
+                cy, cx = stack.pop()
+                count += 1
+                min_x = min(min_x, cx)
+                max_x = max(max_x, cx)
+                min_y = min(min_y, cy)
+                max_y = max(max_y, cy)
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dy == 0 and dx == 0:
+                            continue
+                        ny = cy + dy
+                        nx = cx + dx
+                        if 0 <= ny < height and 0 <= nx < width and mask[ny, nx] and not visited[ny, nx]:
+                            visited[ny, nx] = True
+                            stack.append((ny, nx))
+
+            component_width = max_x - min_x + 1
+            component_height = max_y - min_y + 1
+            if component_width < 20 or component_height < 20:
+                continue
+            if component_width > 58 or component_height > 58:
+                continue
+            aspect = component_width / max(1, component_height)
+            if 0.65 <= aspect <= 1.45 and count >= 160 and min_x <= int(width * 0.35):
+                candidates.append((count, min_x, min_y, max_x + 1, max_y + 1))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[1], item[2], -item[0]))
+    _count, left, top, right, bottom = candidates[0]
+    return left, top, right, bottom
 
 
 def find_foreground_bbox(image: Image.Image) -> BBox | None:
@@ -128,12 +302,14 @@ def find_foreground_bbox(image: Image.Image) -> BBox | None:
     return left, top, right, bottom
 
 
-def enhance_for_saving(image: Image.Image) -> Image.Image:
+def enhance_for_saving(image: Image.Image, make_transparent: bool = True) -> Image.Image:
     gray = ImageOps.grayscale(image)
     gray = ImageOps.autocontrast(gray, cutoff=1)
     gray = ImageEnhance.Contrast(gray).enhance(1.2)
     cleaned = ImageEnhance.Sharpness(gray).enhance(1.15)
-    return make_white_background_transparent(cleaned)
+    if make_transparent:
+        return make_white_background_transparent(cleaned)
+    return cleaned
 
 
 def make_white_background_transparent(image: Image.Image) -> Image.Image:
@@ -167,6 +343,13 @@ def _dilate_mask(mask: np.ndarray) -> np.ndarray:
         for x_offset in range(3):
             result |= padded[y_offset : y_offset + mask.shape[0], x_offset : x_offset + mask.shape[1]]
     return result
+
+
+def _expand_mask(mask: np.ndarray, iterations: int) -> np.ndarray:
+    expanded = mask.astype(bool)
+    for _ in range(iterations):
+        expanded = _dilate_mask(expanded)
+    return expanded
 
 
 def _remove_dense_ink_interiors(mask: np.ndarray) -> np.ndarray:
