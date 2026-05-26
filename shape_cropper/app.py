@@ -184,14 +184,18 @@ class CropperApp(tk.Tk):
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
         self.file_list = tk.Listbox(
             list_frame,
-            activestyle="dotbox",
+            activestyle="none",
             exportselection=False,
+            selectmode=tk.BROWSE,
             yscrollcommand=scrollbar.set,
         )
         scrollbar.configure(command=self.file_list.yview)
         self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.file_list.bind("<<ListboxSelect>>", self.on_file_selected)
+        self.file_list.bind("<Button-1>", self.on_file_clicked)
+        self.file_list.bind("<KeyRelease-Up>", self.on_file_selected)
+        self.file_list.bind("<KeyRelease-Down>", self.on_file_selected)
+        self.file_list.bind("<Return>", self.on_file_selected)
 
     def _build_center_panel(self, parent: ttk.Frame) -> None:
         toolbar = ttk.Frame(parent, style="Toolbar.TFrame")
@@ -504,20 +508,49 @@ class CropperApp(tk.Tk):
 
         self.status_var.set(f"{len(self.image_paths)}개 이미지 로드: {folder}")
         if self.image_paths:
-            self.file_list.selection_set(0)
-            self.file_list.activate(0)
-            self.load_page(self.image_paths[0])
+            self.select_file_index(0)
         else:
             self.page_title_var.set("이미지가 없습니다.")
             self.page_image = None
             self.current_path = None
             self.redraw_page()
 
+    def on_file_clicked(self, event: tk.Event) -> str:
+        if not self.image_paths:
+            return "break"
+        index = self.file_list.nearest(event.y)
+        item_box = self.file_list.bbox(index)
+        if item_box is None:
+            return "break"
+        _x, y, _width, height = item_box
+        if event.y < y or event.y > y + height:
+            return "break"
+        self.file_list.focus_set()
+        self.select_file_index(index)
+        return "break"
+
     def on_file_selected(self, _event: tk.Event) -> None:
         selection = self.file_list.curselection()
         if not selection:
             return
-        self.load_page(self.image_paths[selection[0]])
+        self.select_file_index(selection[0])
+
+    def select_file_index(self, index: int, *, load: bool = True) -> None:
+        if index < 0 or index >= len(self.image_paths):
+            return
+        self.file_list.selection_clear(0, tk.END)
+        self.file_list.selection_set(index)
+        self.file_list.activate(index)
+        self.file_list.see(index)
+        if load and self.image_paths[index] != self.current_path:
+            self.load_page(self.image_paths[index])
+
+    def sync_file_selection_to_path(self, path: Path) -> None:
+        try:
+            index = self.image_paths.index(path)
+        except ValueError:
+            return
+        self.select_file_index(index, load=False)
 
     def load_page(self, path: Path) -> None:
         if self.current_path is not None and path != self.current_path:
@@ -533,6 +566,7 @@ class CropperApp(tk.Tk):
 
         self.page_image = image
         self.current_path = path
+        self.sync_file_selection_to_path(path)
         self.zoom = 1.0
         self.clear_fast_guides(redraw=False)
         self.page_title_var.set(path.name)
