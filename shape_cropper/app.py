@@ -111,6 +111,7 @@ class CropperApp(tk.Tk):
         self.fast_outer_bbox: tuple[int, int, int, int] | None = None
         self.fast_setting_outer = False
         self.fast_outer_start: tuple[int, int] | None = None
+        self.fast_generated_signature: tuple[object, ...] | None = None
         self.recrop_target: CropRecord | None = None
         self.eraser_enabled = False
         self.eraser_sampling = False
@@ -516,6 +517,8 @@ class CropperApp(tk.Tk):
 
     def load_page(self, path: Path) -> None:
         if self.current_path is not None and path != self.current_path:
+            self._auto_generate_fast_crops_before_page_change()
+            self.deactivate_eraser()
             self.finalize_current_page_group()
 
         try:
@@ -1002,6 +1005,20 @@ class CropperApp(tk.Tk):
             self.page_canvas.configure(cursor="crosshair")
             self.status_var.set("지우개 꺼짐.")
 
+    def deactivate_eraser(self) -> None:
+        if not self.eraser_enabled and not self.eraser_dragging and not self.eraser_sampling:
+            return
+        self.eraser_enabled = False
+        self.eraser_sampling = False
+        self.eraser_dragging = False
+        self.eraser_last_point = None
+        self.eraser_area_start = None
+        if self.eraser_area_rect is not None:
+            self.page_canvas.delete(self.eraser_area_rect)
+            self.eraser_area_rect = None
+        self.eraser_button.configure(image=self.eraser_icon, relief=tk.RAISED, bg="#ffffff")
+        self.page_canvas.configure(cursor="crosshair")
+
     def on_eraser_size_changed(self, value: str) -> None:
         self.set_eraser_size(int(float(value)))
 
@@ -1190,6 +1207,7 @@ class CropperApp(tk.Tk):
             self.fast_lines.append(line)
             self.fast_drag_line = line
             self.status_var.set("fast A: 가로선을 추가했습니다.")
+        self.fast_generated_signature = None
         self._redraw_fast_guides()
 
     def start_fast_outer_setting(self) -> None:
@@ -1198,6 +1216,7 @@ class CropperApp(tk.Tk):
         if self.page_image is None:
             self.status_var.set("fast 외곽설정: 먼저 페이지 이미지를 선택하세요.")
             return
+        self.deactivate_eraser()
         self.fast_setting_outer = True
         self.fast_outer_start = None
         self.fast_drag_line = None
@@ -1250,6 +1269,7 @@ class CropperApp(tk.Tk):
             max(0, min(self.page_image.width, right)),
             max(0, min(self.page_image.height, bottom)),
         )
+        self.fast_generated_signature = None
         self._redraw_fast_guides()
         self.status_var.set("fast 외곽설정 완료: 이후 선 크롭은 외곽 안에서만 생성됩니다.")
 
@@ -1262,6 +1282,7 @@ class CropperApp(tk.Tk):
             self.fast_drag_line.coord = max(outer_left + 1, min(outer_right - 1, image_x))
         else:
             self.fast_drag_line.coord = max(outer_top + 1, min(outer_bottom - 1, image_y))
+        self.fast_generated_signature = None
         self._redraw_fast_guides()
 
     def finish_fast_line(self, _event: tk.Event) -> None:
@@ -1273,6 +1294,7 @@ class CropperApp(tk.Tk):
         self.fast_drag_line = None
         self.fast_setting_outer = False
         self.fast_outer_start = None
+        self.fast_generated_signature = None
         if hasattr(self, "page_canvas"):
             self.page_canvas.delete("fast_guide")
             self.page_canvas.delete("fast_outer_temp")
@@ -1283,6 +1305,7 @@ class CropperApp(tk.Tk):
         self.fast_outer_bbox = None
         self.fast_setting_outer = False
         self.fast_outer_start = None
+        self.fast_generated_signature = None
         if hasattr(self, "page_canvas"):
             self.page_canvas.delete("fast_outer_temp")
         if redraw:
@@ -1319,7 +1342,38 @@ class CropperApp(tk.Tk):
                 force_max_width=skip_ocr,
             )
             added += 1
+        if added:
+            self.fast_generated_signature = self._fast_generation_signature()
         self.status_var.set(f"fast 크롭 생성 완료: {added}개 영역")
+
+    def _auto_generate_fast_crops_before_page_change(self) -> None:
+        if not self._is_fast_mode() or self.page_image is None or self.current_path is None:
+            return
+        bboxes = self._fast_bboxes()
+        if not bboxes:
+            return
+        signature = self._fast_generation_signature()
+        if signature == self.fast_generated_signature:
+            return
+        self.generate_fast_crops()
+
+    def _fast_generation_signature(self) -> tuple[object, ...]:
+        lines = tuple(sorted((line.orientation, line.coord, line.side) for line in self.fast_lines))
+        vertical = None
+        if self.fast_vertical_line is not None:
+            vertical = (
+                self.fast_vertical_line.orientation,
+                self.fast_vertical_line.coord,
+                self.fast_vertical_line.side,
+            )
+        return (
+            str(self.current_path) if self.current_path is not None else "",
+            self.fast_type_var.get(),
+            self.fast_outer_bbox,
+            vertical,
+            lines,
+            bool(self.transparent_bg_var.get()),
+        )
 
     def _fast_bboxes(self) -> list[tuple[int, int, int, int]]:
         if self.page_image is None:
