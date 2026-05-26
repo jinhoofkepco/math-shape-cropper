@@ -1501,11 +1501,10 @@ class CropperApp(tk.Tk):
         manifest: list[dict[str, object]] = []
         saved_count = 0
 
-        for group in self.page_groups:
+        for page_index, group in enumerate(self.page_groups, start=1):
             middle = sanitize_name(group.middle_name_var.get(), group.source_path.stem)
-            for index, record in enumerate(group.records, start=1):
-                suffix = sanitize_name(record.suffix_var.get(), f"{index:03d}")
-                file_name = self._build_output_file_name(common, middle, suffix)
+            for problem_index, record in enumerate(group.records):
+                file_name = self._page_problem_file_name(page_index, problem_index)
                 output_path = unique_path(output_dir / file_name)
                 record.image.save(output_path)
                 saved_count += 1
@@ -1514,6 +1513,8 @@ class CropperApp(tk.Tk):
                         "file": output_path.name,
                         "source": str(record.source_path),
                         "page_name": middle,
+                        "page_index": page_index,
+                        "problem_index": problem_index,
                         "original_bbox": record.original_bbox,
                         "refined_bbox": record.refined_bbox,
                     }
@@ -1536,8 +1537,8 @@ class CropperApp(tk.Tk):
 
         chapters: list[dict[str, object]] = []
         chapter_by_subunit: dict[str, str] = {}
-        record_items: list[tuple[str, str, CropRecord]] = []
-        for group in self.page_groups:
+        record_items: list[tuple[str, str, int, int, CropRecord]] = []
+        for page_index, group in enumerate(self.page_groups, start=1):
             if not group.records:
                 continue
             subunit_name = group.middle_name_var.get().strip() or "기본 진도"
@@ -1552,17 +1553,17 @@ class CropperApp(tk.Tk):
                         "orderIndex": len(chapters) + 1,
                     }
                 )
-            for record in group.records:
-                record_items.append((chapter_id, subunit_name, record))
+            for problem_index, record in enumerate(group.records):
+                record_items.append((chapter_id, subunit_name, page_index, problem_index, record))
 
         problems: list[dict[str, object]] = []
         manifest: list[dict[str, object]] = []
         used_image_names: set[str] = set()
 
-        for index, (chapter_id, subunit_name, record) in enumerate(record_items, start=1):
-            problem_number = record.problem_number_var.get().strip() or str(index)
+        for index, (chapter_id, subunit_name, page_index, problem_index, record) in enumerate(record_items, start=1):
+            problem_number = record.problem_number_var.get().strip() or str(problem_index)
             answer = normalize_answer_text(record.answer_var.get())
-            problem_key = self._slugify(problem_number, f"{index:03d}")
+            problem_key = f"{page_index}-{problem_index}"
             problem_id = f"{workbook_id}-p{index:03d}"
             image_name = self._unique_zip_image_name(problem_key, used_image_names)
             answer_field_id = f"{problem_id}-answer"
@@ -1607,6 +1608,8 @@ class CropperApp(tk.Tk):
                     "chapterId": chapter_id,
                     "source": str(record.source_path),
                     "imagePath": f"images/{image_name}",
+                    "pageIndex": page_index,
+                    "problemIndex": problem_index,
                     "original_bbox": record.original_bbox,
                     "answer_bbox": record.answer_bbox,
                     "ocr_note": record.ocr_note_var.get(),
@@ -1629,7 +1632,7 @@ class CropperApp(tk.Tk):
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("workbook.json", json.dumps(workbook_json, ensure_ascii=False, indent=2))
             archive.writestr("cropper_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-            for problem, (_chapter_id, _subunit_name, record) in zip(problems, record_items):
+            for problem, (_chapter_id, _subunit_name, _page_index, _problem_index, record) in zip(problems, record_items):
                 image_path = str(problem["imagePath"])
                 buffer = BytesIO()
                 record.image.save(buffer, format="PNG")
@@ -1637,6 +1640,9 @@ class CropperApp(tk.Tk):
 
         self.status_var.set(f"{len(problems)}개 문제 ZIP 생성 완료: {zip_path}")
         messagebox.showinfo("생성 완료", f"{len(problems)}개 문제를 워크북 ZIP으로 생성했습니다.\n{zip_path}")
+
+    def _page_problem_file_name(self, page_index: int, problem_index: int) -> str:
+        return f"{page_index}-{problem_index}.png"
 
     def _build_output_file_name(self, common: str, middle: str, suffix: str) -> str:
         parts: list[str] = []
