@@ -295,12 +295,16 @@ class CropperApp(tk.Tk):
         self.eraser_dragging = False
         self.eraser_last_point = None
         self.eraser_area_start = None
+        if mode == ERASER_AREA:
+            self.eraser_sampling = False
         if self.eraser_area_rect is not None:
             self.page_canvas.delete(self.eraser_area_rect)
             self.eraser_area_rect = None
         self.update_eraser_mode_buttons()
         if self.eraser_enabled:
             self.page_canvas.configure(cursor="tcross" if mode == ERASER_AREA else "dotbox")
+            if mode == ERASER_AREA:
+                self.status_var.set("영역 지우개: 드래그 시작점 색으로 선택 영역을 칠합니다.")
 
     def update_eraser_mode_buttons(self) -> None:
         for mode, button in self.eraser_mode_buttons.items():
@@ -999,7 +1003,11 @@ class CropperApp(tk.Tk):
         if self.eraser_enabled:
             self.eraser_button.configure(image=self.eraser_icon_active, relief=tk.SUNKEN, bg="#dbeafe")
             self.page_canvas.configure(cursor="tcross" if self.eraser_mode_var.get() == ERASER_AREA else "dotbox")
-            self.status_var.set("지우개: 지울 배경색으로 쓸 여백을 한 번 클릭하세요.")
+            if self.eraser_mode_var.get() == ERASER_AREA:
+                self.eraser_sampling = False
+                self.status_var.set("영역 지우개: 드래그 시작점 색으로 선택 영역을 칠합니다.")
+            else:
+                self.status_var.set("지우개: 지울 배경색으로 쓸 여백을 한 번 클릭하세요.")
         else:
             self.eraser_button.configure(image=self.eraser_icon, relief=tk.RAISED, bg="#ffffff")
             self.page_canvas.configure(cursor="crosshair")
@@ -1026,13 +1034,13 @@ class CropperApp(tk.Tk):
         if self.page_image is None or not self._point_in_display(event.x, event.y):
             self.eraser_dragging = False
             return
+        if self.eraser_mode_var.get() == ERASER_AREA:
+            self.start_eraser_area(event)
+            return
         if self.eraser_sampling:
             self.sample_eraser_color(event)
             self.eraser_sampling = False
             self.eraser_dragging = False
-            return
-        if self.eraser_mode_var.get() == ERASER_AREA:
-            self.start_eraser_area(event)
             return
         self.eraser_dragging = True
         self.eraser_last_point = self._display_point_to_image_point(event.x, event.y)
@@ -1054,6 +1062,9 @@ class CropperApp(tk.Tk):
     def start_eraser_area(self, event: tk.Event) -> None:
         self.eraser_dragging = True
         self.eraser_area_start = self._display_point_to_image_point(event.x, event.y)
+        self.eraser_sampling = False
+        self.eraser_color = self._average_image_color(self.eraser_area_start[0], self.eraser_area_start[1], radius=0)
+        self.update_eraser_swatch()
         if self.eraser_area_rect is not None:
             self.page_canvas.delete(self.eraser_area_rect)
         x, y = self._clamp_display_point(event.x, event.y)
