@@ -1363,6 +1363,10 @@ class CropperApp(tk.Tk):
         if not bboxes:
             self.status_var.set("fast: 생성할 크롭 영역이 없습니다. 선을 먼저 추가하세요.")
             return
+        skipped = 0
+        if self.fast_type_var.get() == FAST_A and len(bboxes) >= 2:
+            bboxes = bboxes[:1] + bboxes[2:]
+            skipped = 1
 
         make_transparent = self.transparent_bg_var.get()
         added = 0
@@ -1389,7 +1393,8 @@ class CropperApp(tk.Tk):
             added += 1
         if added:
             self.fast_generated_signature = self._fast_generation_signature()
-        self.status_var.set(f"fast 크롭 생성 완료: {added}개 영역")
+        skipped_text = f" / 2번째 자동 제외 {skipped}개" if skipped else ""
+        self.status_var.set(f"fast 크롭 생성 완료: {added}개 영역{skipped_text}")
 
     def _auto_generate_fast_crops_before_page_change(self) -> None:
         if not self._is_fast_mode() or self.page_image is None or self.current_path is None:
