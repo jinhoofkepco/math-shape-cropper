@@ -34,6 +34,8 @@ except ImportError:
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+PDF_EXTENSIONS = {".pdf"}
+SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | PDF_EXTENSIONS
 MODE_SHAPE = "shape"
 MODE_WORKBOOK = "workbook"
 MODE_FAST = "fast"
@@ -43,9 +45,38 @@ ERASER_BRUSH = "brush"
 ERASER_AREA = "area"
 
 
+@dataclass(frozen=True)
+class PageSource:
+    path: Path
+    page_index: int | None = None
+    page_count: int | None = None
+
+    @property
+    def is_pdf(self) -> bool:
+        return self.page_index is not None
+
+    @property
+    def name(self) -> str:
+        if self.page_index is None:
+            return self.path.name
+        total = f"/{self.page_count}" if self.page_count else ""
+        return f"{self.path.name} p.{self.page_index + 1}{total}"
+
+    @property
+    def stem(self) -> str:
+        if self.page_index is None:
+            return self.path.stem
+        return f"{self.path.stem}_p{self.page_index + 1:03d}"
+
+    def __str__(self) -> str:
+        if self.page_index is None:
+            return str(self.path)
+        return f"{self.path}#page={self.page_index + 1}"
+
+
 @dataclass
 class CropRecord:
-    source_path: Path
+    source_path: PageSource
     image: Image.Image
     original_bbox: tuple[int, int, int, int]
     refined_bbox: tuple[int, int, int, int]
@@ -60,7 +91,7 @@ class CropRecord:
 
 @dataclass
 class PageCropGroup:
-    source_path: Path
+    source_path: PageSource
     middle_name_var: tk.StringVar
     records: list[CropRecord]
 
@@ -79,13 +110,13 @@ class CropperApp(tk.Tk):
         self.geometry("1500x900")
         self.minsize(1100, 700)
 
-        self.image_paths: list[Path] = []
+        self.image_paths: list[PageSource] = []
         self.selected_folder: Path | None = None
         self.output_base: Path | None = None
         self.page_image: Image.Image | None = None
         self.page_photo: ImageTk.PhotoImage | None = None
         self.page_image_item: int | None = None
-        self.current_path: Path | None = None
+        self.current_path: PageSource | None = None
         self.display_scale = 1.0
         self.base_scale = 1.0
         self.zoom = 1.0
@@ -94,7 +125,7 @@ class CropperApp(tk.Tk):
         self.selection_rect: int | None = None
         self.crop_records: list[CropRecord] = []
         self.page_groups: list[PageCropGroup] = []
-        self.page_group_by_path: dict[Path, PageCropGroup] = {}
+        self.page_group_by_path: dict[PageSource, PageCropGroup] = {}
         self.last_subunit_name = ""
 
         self.mode_var = tk.StringVar(value=MODE_SHAPE)
@@ -134,7 +165,10 @@ class CropperApp(tk.Tk):
         self.bind("<Control-minus>", lambda _event: self.adjust_zoom(1 / 1.15))
 
         if initial_folder:
-            self.load_folder(initial_folder)
+            if initial_folder.is_file():
+                self.load_file(initial_folder)
+            else:
+                self.load_folder(initial_folder)
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
@@ -172,9 +206,10 @@ class CropperApp(tk.Tk):
         header.pack(fill=tk.X, padx=10, pady=10)
 
         ttk.Button(header, text="폴더 선택", command=self.choose_folder).pack(fill=tk.X)
+        ttk.Button(header, text="파일 선택", command=self.choose_file).pack(fill=tk.X, pady=(6, 0))
         ttk.Label(
             parent,
-            text="문제집 사진",
+            text="문제집 사진/PDF",
             style="Muted.TLabel",
             anchor=tk.W,
         ).pack(fill=tk.X, padx=12, pady=(4, 4))
@@ -395,7 +430,6 @@ class CropperApp(tk.Tk):
             command=self.on_fast_type_changed,
         )
         self.fast_b_button.pack(side=tk.LEFT, padx=(8, 0))
-
         ttk.Label(top, text="공통 이름 / 워크북 제목").pack(anchor=tk.W)
         ttk.Entry(top, textvariable=self.common_name_var).pack(fill=tk.X, pady=(2, 8))
 
@@ -409,7 +443,7 @@ class CropperApp(tk.Tk):
         base_row = ttk.Frame(top, style="Panel.TFrame")
         base_row.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(base_row, text="저장 위치", command=self.choose_output_base).pack(side=tk.LEFT)
-        self.output_base_var = tk.StringVar(value="선택한 사진 폴더 기준")
+        self.output_base_var = tk.StringVar(value="선택한 사진/PDF 폴더 기준")
         ttk.Label(base_row, textvariable=self.output_base_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
 
         ttk.Checkbutton(
@@ -433,9 +467,22 @@ class CropperApp(tk.Tk):
             self.crop_inner.columnconfigure(column, weight=1, uniform="crop")
 
     def choose_folder(self) -> None:
-        folder = filedialog.askdirectory(title="문제집 사진 폴더 선택")
+        folder = filedialog.askdirectory(title="문제집 사진/PDF 폴더 선택")
         if folder:
             self.load_folder(Path(folder))
+
+    def choose_file(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="문제집 PDF/이미지 파일 선택",
+            filetypes=[
+                ("PDF/이미지", "*.pdf *.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff"),
+                ("PDF", "*.pdf"),
+                ("이미지", "*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff"),
+                ("모든 파일", "*.*"),
+            ],
+        )
+        if file_path:
+            self.load_file(Path(file_path))
 
     def choose_output_base(self) -> None:
         folder = filedialog.askdirectory(title="저장 기준 폴더 선택")
@@ -489,34 +536,126 @@ class CropperApp(tk.Tk):
             messagebox.showerror("폴더 없음", f"폴더를 찾을 수 없습니다.\n{folder}")
             return
 
+        self._reset_loaded_project()
         self.selected_folder = folder
         self.output_base = None
-        self.output_base_var.set("선택한 사진 폴더 기준")
+        self.output_base_var.set("선택한 사진/PDF 폴더 기준")
+        self.image_paths = self._load_page_sources(folder)
+        self._show_loaded_pages(f"{len(self.image_paths)}개 페이지 로드: {folder}")
+
+    def load_file(self, file_path: Path) -> None:
+        if not file_path.exists():
+            messagebox.showerror("파일 없음", f"파일을 찾을 수 없습니다.\n{file_path}")
+            return
+        if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            messagebox.showerror("지원하지 않는 파일", f"PDF 또는 이미지 파일을 선택하세요.\n{file_path}")
+            return
+
+        try:
+            sources = self._load_page_sources_from_file(file_path)
+        except Exception as exc:
+            messagebox.showerror("파일 로드 실패", f"{file_path.name}\n{exc}")
+            return
+
+        self._reset_loaded_project()
+        self.selected_folder = file_path.parent
+        self.output_base = None
+        self.output_base_var.set("선택한 파일 폴더 기준")
+        if not self.common_name_var.get().strip():
+            self.common_name_var.set(file_path.stem)
+        self.image_paths = sources
+        self._show_loaded_pages(f"{len(self.image_paths)}개 페이지 로드: {file_path}")
+
+    def _reset_loaded_project(self) -> None:
+        self.page_image = None
+        self.page_photo = None
+        self.page_image_item = None
+        self.current_path = None
         self.crop_records.clear()
         self.page_groups.clear()
         self.page_group_by_path.clear()
         self.last_subunit_name = ""
         self.clear_fast_outer(redraw=False)
         self._refresh_crop_grid()
-        self.image_paths = sorted(
-            [path for path in folder.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS],
-            key=lambda path: path.name.lower(),
-        )
+
+    def _show_loaded_pages(self, status_text: str) -> None:
         self.file_list.delete(0, tk.END)
         for path in self.image_paths:
             self.file_list.insert(tk.END, path.name)
+        self._refresh_page_list_marks()
 
-        self.status_var.set(f"{len(self.image_paths)}개 이미지 로드: {folder}")
+        self.status_var.set(status_text)
         if self.image_paths:
             self.select_file_index(0)
         else:
-            self.page_title_var.set("이미지가 없습니다.")
+            self.page_title_var.set("이미지/PDF 페이지가 없습니다.")
             self.page_image = None
             self.current_path = None
             self.redraw_page()
 
+    def _refresh_page_list_marks(self) -> None:
+        cropped_pages = {group.source_path for group in self.page_groups if group.records}
+        for index, source in enumerate(self.image_paths):
+            color = "#2563eb" if source in cropped_pages else "#111827"
+            self.file_list.itemconfig(index, foreground=color)
+
+    def _refresh_page_list_mark(self, source: PageSource) -> None:
+        try:
+            index = self.image_paths.index(source)
+        except ValueError:
+            return
+        group = self.page_group_by_path.get(source)
+        color = "#2563eb" if group is not None and group.records else "#111827"
+        self.file_list.itemconfig(index, foreground=color)
+
+    def _load_page_sources(self, folder: Path) -> list[PageSource]:
+        sources: list[PageSource] = []
+        errors: list[str] = []
+        files = sorted(
+            [path for path in folder.iterdir() if path.suffix.lower() in SUPPORTED_EXTENSIONS],
+            key=lambda path: path.name.lower(),
+        )
+        for path in files:
+            try:
+                sources.extend(self._load_page_sources_from_file(path))
+            except Exception as exc:
+                errors.append(f"{path.name}: {exc}")
+        if errors:
+            messagebox.showwarning("PDF 로드 실패", "\n".join(errors[:8]))
+        return sources
+
+    def _load_page_sources_from_file(self, path: Path) -> list[PageSource]:
+        suffix = path.suffix.lower()
+        if suffix in PDF_EXTENSIONS:
+            page_count = self._pdf_page_count(path)
+            if page_count <= 0:
+                raise ValueError("PDF 페이지가 없습니다.")
+            return [PageSource(path, page_index, page_count) for page_index in range(page_count)]
+        if suffix in IMAGE_EXTENSIONS:
+            return [PageSource(path)]
+        raise ValueError("지원하지 않는 파일 형식입니다.")
+
+    def _pdf_page_count(self, path: Path) -> int:
+        fitz = self._load_fitz()
+        document = fitz.open(str(path))
+        try:
+            return int(document.page_count)
+        finally:
+            document.close()
+
+    def _load_fitz(self):
+        try:
+            import fitz
+        except Exception as exc:
+            raise RuntimeError("PDF 작업에는 PyMuPDF가 필요합니다. requirements.txt 설치를 다시 실행하세요.") from exc
+        return fitz
+
     def on_file_clicked(self, event: tk.Event) -> str:
         if not self.image_paths:
+            return "break"
+        if event.x < 0 or event.x > self.file_list.winfo_width():
+            return "break"
+        if self.winfo_containing(event.x_root, event.y_root) != self.file_list:
             return "break"
         index = self.file_list.nearest(event.y)
         item_box = self.file_list.bbox(index)
@@ -535,33 +674,38 @@ class CropperApp(tk.Tk):
             return
         self.select_file_index(selection[0])
 
-    def select_file_index(self, index: int, *, load: bool = True) -> None:
+    def select_file_index(self, index: int, *, load: bool = True, ensure_visible: bool = True) -> None:
         if index < 0 or index >= len(self.image_paths):
             return
-        self.file_list.selection_clear(0, tk.END)
-        self.file_list.selection_set(index)
-        self.file_list.activate(index)
-        self.file_list.see(index)
+        current_selection = self.file_list.curselection()
+        if current_selection != (index,):
+            self.file_list.selection_clear(0, tk.END)
+            self.file_list.selection_set(index)
+            self.file_list.activate(index)
+        if ensure_visible:
+            self.file_list.see(index)
         if load and self.image_paths[index] != self.current_path:
             self.load_page(self.image_paths[index])
 
-    def sync_file_selection_to_path(self, path: Path) -> None:
+    def sync_file_selection_to_path(self, path: PageSource) -> None:
         try:
             index = self.image_paths.index(path)
         except ValueError:
             return
-        self.select_file_index(index, load=False)
+        if self.file_list.curselection() == (index,):
+            return
+        self.select_file_index(index, load=False, ensure_visible=False)
 
-    def load_page(self, path: Path) -> None:
+    def load_page(self, path: PageSource) -> None:
         if self.current_path is not None and path != self.current_path:
             self._auto_generate_fast_crops_before_page_change()
             self.deactivate_eraser()
             self.finalize_current_page_group()
 
         try:
-            image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+            image = self._load_page_source_image(path)
         except Exception as exc:
-            messagebox.showerror("이미지 열기 실패", f"{path.name}\n{exc}")
+            messagebox.showerror("페이지 열기 실패", f"{path.name}\n{exc}")
             return
 
         self.page_image = image
@@ -580,6 +724,23 @@ class CropperApp(tk.Tk):
         else:
             self.status_var.set("도형 영역을 드래그하면 오른쪽에 보정된 크롭이 추가됩니다.")
 
+    def _load_page_source_image(self, source: PageSource) -> Image.Image:
+        if not source.is_pdf:
+            return ImageOps.exif_transpose(Image.open(source.path)).convert("RGB")
+
+        fitz = self._load_fitz()
+        document = fitz.open(str(source.path))
+        try:
+            page_index = source.page_index or 0
+            if page_index < 0 or page_index >= document.page_count:
+                raise ValueError("PDF 페이지 번호가 올바르지 않습니다.")
+            page = document.load_page(page_index)
+            matrix = fitz.Matrix(2.0, 2.0)
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+        finally:
+            document.close()
+
     def redraw_page(self) -> None:
         self.page_canvas.delete("all")
         self.selection_rect = None
@@ -594,7 +755,7 @@ class CropperApp(tk.Tk):
             self.page_canvas.create_text(
                 canvas_width // 2,
                 canvas_height // 2,
-                text="왼쪽에서 문제집 사진 폴더를 선택하세요.",
+                text="왼쪽에서 문제집 사진/PDF 폴더를 선택하세요.",
                 fill="#475569",
                 font=("Malgun Gothic", 14),
             )
@@ -747,11 +908,13 @@ class CropperApp(tk.Tk):
     def add_crop(
         self,
         processed: ProcessedCrop,
-        source_path: Path,
+        source_path: PageSource,
         *,
         problem_number: str = "",
         answer: str = "",
         force_max_width: bool | None = None,
+        refresh: bool = True,
+        update_status: bool = True,
     ) -> None:
         group = self._get_page_group(source_path)
         suffix = str(len(group.records))
@@ -783,7 +946,11 @@ class CropperApp(tk.Tk):
         )
         self.crop_records.append(record)
         group.records.append(record)
-        self._refresh_crop_grid(scroll_to_bottom=True)
+        self._refresh_page_list_mark(source_path)
+        if refresh:
+            self._refresh_crop_grid(scroll_to_bottom=True)
+        if not update_status:
+            return
         if self._uses_workbook_export():
             label = f"문제 {problem_number or '?'} / 답 {answer or '?'}"
             prefix = "fast 문제" if self._is_fast_mode() else "워크북 문제"
@@ -798,15 +965,15 @@ class CropperApp(tk.Tk):
         if group is None:
             return
 
-        changed = self._finalize_page_group(group)
+        changed = self._finalize_page_group(group, auto_middle=False)
         if changed:
             self._refresh_crop_grid()
 
-    def finalize_all_page_groups(self) -> None:
+    def finalize_all_page_groups(self, *, auto_middle: bool = False) -> None:
         previous_middle = ""
         changed = False
         for group in self.page_groups:
-            changed = self._finalize_page_group(group, previous_middle) or changed
+            changed = self._finalize_page_group(group, previous_middle, auto_middle=auto_middle) or changed
             middle_name = group.middle_name_var.get().strip()
             if middle_name:
                 previous_middle = middle_name
@@ -815,10 +982,16 @@ class CropperApp(tk.Tk):
         if changed:
             self._refresh_crop_grid()
 
-    def _finalize_page_group(self, group: PageCropGroup, previous_middle: str | None = None) -> bool:
+    def _finalize_page_group(
+        self,
+        group: PageCropGroup,
+        previous_middle: str | None = None,
+        *,
+        auto_middle: bool = False,
+    ) -> bool:
         changed = False
         middle_name = group.middle_name_var.get().strip()
-        if not middle_name:
+        if auto_middle and not middle_name:
             generated_middle = self._next_middle_name(previous_middle if previous_middle is not None else self.last_subunit_name)
             if generated_middle:
                 group.middle_name_var.set(generated_middle)
@@ -849,7 +1022,7 @@ class CropperApp(tk.Tk):
             next_number = next_number.zfill(len(number_text))
         return f"{previous_middle[:last_match.start()]}{next_number}{previous_middle[last_match.end():]}"
 
-    def _get_page_group(self, source_path: Path) -> PageCropGroup:
+    def _get_page_group(self, source_path: PageSource) -> PageCropGroup:
         group = self.page_group_by_path.get(source_path)
         if group is not None:
             return group
@@ -899,8 +1072,9 @@ class CropperApp(tk.Tk):
         card.grid(row=row, column=column, sticky="nsew", padx=4, pady=4)
         card.columnconfigure(0, weight=1)
 
-        preview = self._make_preview(record.image, max_width=94, max_height=82)
-        record.photo = ImageTk.PhotoImage(preview)
+        if record.photo is None:
+            preview = self._make_preview(record.image, max_width=94, max_height=82)
+            record.photo = ImageTk.PhotoImage(preview)
         preview_label = ttk.Label(card, image=record.photo, background="#ffffff", cursor="hand2")
         preview_label.grid(row=0, column=0, padx=5, pady=(5, 3))
         preview_label.bind("<Button-1>", lambda _event, item=record: self._on_crop_card_click(item))
@@ -977,6 +1151,7 @@ class CropperApp(tk.Tk):
             group.records.remove(record)
         self.page_groups = [page_group for page_group in self.page_groups if page_group.records]
         self.page_group_by_path = {page_group.source_path: page_group for page_group in self.page_groups}
+        self._refresh_page_list_marks()
         self._refresh_crop_grid()
         self.status_var.set("크롭을 삭제했습니다.")
 
@@ -1371,7 +1546,9 @@ class CropperApp(tk.Tk):
         make_transparent = self.transparent_bg_var.get()
         added = 0
         skip_ocr = self.fast_type_var.get() == FAST_A
-        for bbox in bboxes:
+        for bbox_index, bbox in enumerate(bboxes):
+            if skip_ocr and bbox_index == 1:
+                continue
             try:
                 if skip_ocr:
                     processed = process_crop(self.page_image, bbox, refine_bounds=False, make_transparent=make_transparent)
@@ -1389,8 +1566,12 @@ class CropperApp(tk.Tk):
                 problem_number=problem_number,
                 answer=answer,
                 force_max_width=skip_ocr,
+                refresh=False,
+                update_status=False,
             )
             added += 1
+        if added:
+            self._refresh_crop_grid(scroll_to_bottom=True)
         if added:
             self.fast_generated_signature = self._fast_generation_signature()
         skipped_text = f" / 2번째 자동 제외 {skipped}개" if skipped else ""
@@ -1630,6 +1811,8 @@ class CropperApp(tk.Tk):
         messagebox.showinfo("저장 완료", f"{saved_count}개 이미지를 저장했습니다.\n{output_dir}")
 
     def create_workbook_zip(self) -> None:
+        self.finalize_all_page_groups(auto_middle=True)
+
         base = self.output_base or self.selected_folder or Path.cwd()
         export_name = sanitize_name(self.save_folder_var.get(), "workbook_export")
         output_dir = base / export_name
