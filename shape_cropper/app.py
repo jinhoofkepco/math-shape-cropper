@@ -1546,9 +1546,7 @@ class CropperApp(tk.Tk):
         make_transparent = self.transparent_bg_var.get()
         added = 0
         skip_ocr = self.fast_type_var.get() == FAST_A
-        for bbox_index, bbox in enumerate(bboxes):
-            if skip_ocr and bbox_index == 1:
-                continue
+        for bbox in bboxes:
             try:
                 if skip_ocr:
                     processed = process_crop(self.page_image, bbox, refine_bounds=False, make_transparent=make_transparent)
